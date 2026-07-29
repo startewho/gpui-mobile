@@ -19,12 +19,23 @@ plugins {
 
 android {
     namespace = "dev.gpui.mobile.example"
-    compileSdk = 34
-
+    compileSdk = 35
+ signingConfigs {
+ create("release") {
+            enableV1Signing =true
+            enableV2Signing =true
+            enableV3Signing =true
+            enableV4Signing =true
+            storeFile = file("../signkey.keystore")
+            storePassword = "123abc"
+            keyAlias = "key"
+            keyPassword = "123abc"
+        }
+}
     defaultConfig {
         applicationId = "dev.gpui.mobile.example"
         minSdk = 26          // Vulkan 1.0 is mandatory from API 26+
-        targetSdk = 34
+        targetSdk = 35
         versionCode = 1
         versionName = "1.0.0"
 
@@ -40,6 +51,7 @@ android {
 
     buildTypes {
         release {
+            signingConfig = signingConfigs.getByName("release")
             isMinifyEnabled = false
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),

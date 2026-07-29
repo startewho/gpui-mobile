@@ -255,9 +255,9 @@ impl IntoElement for LinearProgressIndicator {
         for i in 0..total_segments {
             let is_filled = i >= filled_start && i < filled_start + filled_count;
             let segment = if is_filled {
-                div().h_full().bg(active).flex_grow()
+                div().h_full().bg(active).flex_grow_0()
             } else {
-                div().h_full().flex_grow()
+                div().h_full().flex_grow_0()
             };
             track = track.child(segment);
         }

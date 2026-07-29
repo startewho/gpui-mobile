@@ -1966,6 +1966,7 @@ impl PlatformWindow for AndroidPlatformWindow {
             Ok(())
         });
     }
+    
 }
 
 // ── Fallback atlas ────────────────────────────────────────────────────────────
