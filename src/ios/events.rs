@@ -1,10 +1,9 @@
 //! iOS event handling - converting UIKit events to GPUI's event types.
 //!
-//! iOS uses touch-based input rather than mouse input, so we need to map
-//! touch gestures to appropriate GPUI events:
-//! - Single tap → MouseDown + MouseUp (left button)
-//! - Pan gesture → ScrollWheel events
-//! - Touch move → MouseMove events
+//! iOS uses touch-based input rather than mouse input, so we map UIKit touch
+//! phases to GPUI's `TouchPhase`, and let GPUI core's portable gesture
+//! recognizer turn raw `TouchEvent`s into taps (synthesized mouse presses),
+//! scroll pans (`ScrollWheel` events), long presses and touch drags.
 
 use gpui::{px, Pixels, Point, TouchPhase};
 use objc2::msg_send;
@@ -43,7 +42,7 @@ impl From<UITouchPhase> for TouchPhase {
             UITouchPhase::Moved => TouchPhase::Moved,
             UITouchPhase::Stationary => TouchPhase::Moved,
             UITouchPhase::Ended => TouchPhase::Ended,
-            UITouchPhase::Cancelled => TouchPhase::Ended,
+            UITouchPhase::Cancelled => TouchPhase::Cancelled,
         }
     }
 }
@@ -61,13 +60,5 @@ pub fn touch_phase(touch: *mut AnyObject) -> UITouchPhase {
     unsafe {
         let phase: i64 = msg_send![touch, phase];
         UITouchPhase::from(phase)
-    }
-}
-
-/// Get the number of taps for a touch (for detecting double-tap, etc.)
-pub fn touch_tap_count(touch: *mut AnyObject) -> u32 {
-    unsafe {
-        let count: i64 = msg_send![touch, tapCount];
-        count as u32
     }
 }

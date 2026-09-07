@@ -22,6 +22,7 @@ set "TARGET_KIND=device"
 set "PROFILE=debug"
 set "CLEAN=false"
 set "NO_RUN=false"
+set "X64=false"
 
 :: -- Usage / Help -------------------------------------------------------------
 if "%~1"=="" goto usage
@@ -47,6 +48,7 @@ if /I "%~1" == "--emulator"  set "TARGET_KIND=emulator"& shift & goto parse_args
 if /I "%~1" == "--release"   set "PROFILE=release"& shift & goto parse_args
 if /I "%~1" == "--clean"     set "CLEAN=true"& shift & goto parse_args
 if /I "%~1" == "--no-run"    set "NO_RUN=true"& shift & goto parse_args
+if /I "%~1" == "--x64"       set "X64=true"& shift & goto parse_args
 if /I "%~1" == "-h"          goto usage
 if /I "%~1" == "--help"      goto usage
 shift
@@ -74,8 +76,14 @@ if "%ANDROID_HOME%"=="" if "%ANDROID_SDK_ROOT%"=="" (
     if EXIST "%LOCALAPPDATA%\Android\Sdk" set "ANDROID_HOME=%LOCALAPPDATA%\Android\Sdk"
 )
 
+if "%X64%"=="true" (
+set "RUST_TARGET=x86_64-linux-android"
+set "NDK_ABI=x86_64"
+)
+if "%X64%"=="false" (
 set "RUST_TARGET=aarch64-linux-android"
 set "NDK_ABI=arm64-v8a"
+)
 set "CARGO_PROFILE_FLAG="
 set "GRADLE_TASK=assembleDebug"
 set "APK_VARIANT=debug"

@@ -1,8 +1,10 @@
 //! iMessage-style chat screen with bubbles, reactions, images, timestamps,
 //! and a working text input composer bar.
 
-use gpui::{div, prelude::*, px, rgb, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent};
+use gpui::{canvas, div, prelude::*, px, rgb, MouseButton, MouseDownEvent, MouseUpEvent};
 use gpui_mobile::KeyboardType;
+
+use crate::gesture::handle_touch_drag;
 use std::cell::RefCell;
 
 use super::Router;
@@ -530,45 +532,61 @@ fn render_bubble_interactive(
 
     // Wrapper with per-bubble swipe gesture
     let is_me = msg.is_me;
+    let view = cx.entity();
     let mut outer = div()
         .flex()
         .flex_col()
         .w_full()
-        // Per-bubble horizontal swipe — detect start in on_mouse_move
-        // (iOS defers on_mouse_down for drags).
-        .on_mouse_move(
-            cx.listener(move |_this, event: &MouseMoveEvent, _window, cx| {
-                let changed = CHAT_STATE.with(|s| {
-                    let mut st = s.borrow_mut();
-                    let x = event.position.x.as_f32();
-                    // If another bubble is being swiped, ignore
-                    if st.swipe_msg.is_some() && st.swipe_msg != Some(idx) {
-                        return false;
-                    }
-                    if st.swipe_start_x.is_none() {
-                        st.swipe_start_x = Some(x);
-                        st.swipe_msg = Some(idx);
-                        return false;
-                    }
-                    let start_x = st.swipe_start_x.unwrap();
-                    let dx = x - start_x;
-                    // Direction lock: sent → left only, received → right only
-                    let clamped = if is_me {
-                        dx.min(0.0).max(-70.0)
-                    } else {
-                        dx.max(0.0).min(70.0)
-                    };
-                    if clamped.abs() > 5.0 {
-                        st.swipe_msg = Some(idx);
-                        st.swipe_offset = clamped;
-                        return true;
-                    }
-                    false
-                });
-                if changed {
-                    cx.notify();
-                }
-            }),
+        .relative()
+        // Per-bubble horizontal swipe — claim the drag so the bubble slides.
+        .child(
+            canvas(
+                move |_bounds, _window, _cx| (),
+                move |bounds, (), window, _cx| {
+                    handle_touch_drag(window, bounds, move |event, _window, cx| {
+                        view.update(cx, |_this, cx| {
+                            let changed = CHAT_STATE.with(|s| {
+                                let mut st = s.borrow_mut();
+                                if matches!(event.phase, gpui::TouchPhase::Ended | gpui::TouchPhase::Cancelled) {
+                                    st.swipe_start_x = None;
+                                    st.swipe_offset = 0.0;
+                                    st.swipe_msg = None;
+                                    return st.swipe_offset.abs() > 0.1;
+                                }
+                                let x = event.position.x.as_f32();
+                                // If another bubble is being swiped, ignore
+                                if st.swipe_msg.is_some() && st.swipe_msg != Some(idx) {
+                                    return false;
+                                }
+                                if st.swipe_start_x.is_none() {
+                                    st.swipe_start_x = Some(x);
+                                    st.swipe_msg = Some(idx);
+                                    return false;
+                                }
+                                let start_x = st.swipe_start_x.unwrap();
+                                let dx = x - start_x;
+                                // Direction lock: sent → left only, received → right only
+                                let clamped = if is_me {
+                                    dx.min(0.0).max(-70.0)
+                                } else {
+                                    dx.max(0.0).min(70.0)
+                                };
+                                if clamped.abs() > 5.0 {
+                                    st.swipe_msg = Some(idx);
+                                    st.swipe_offset = clamped;
+                                    return true;
+                                }
+                                false
+                            });
+                            if changed {
+                                cx.notify();
+                            }
+                        });
+                    });
+                },
+            )
+            .absolute()
+            .size_full(),
         );
     if msg.is_me {
         outer = outer.items_end();
@@ -693,38 +711,55 @@ fn render_sent_bubble_interactive(
     swipe_offset: f32,
     cx: &mut gpui::Context<Router>,
 ) -> impl IntoElement {
+    let view = cx.entity();
     let mut outer = div()
         .flex()
         .flex_col()
         .w_full()
         .items_end()
+        .relative()
         // Per-bubble swipe (sent → left only)
-        .on_mouse_move(
-            cx.listener(move |_this, event: &MouseMoveEvent, _window, cx| {
-                let changed = CHAT_STATE.with(|s| {
-                    let mut st = s.borrow_mut();
-                    let x = event.position.x.as_f32();
-                    if st.swipe_msg.is_some() && st.swipe_msg != Some(idx) {
-                        return false;
-                    }
-                    if st.swipe_start_x.is_none() {
-                        st.swipe_start_x = Some(x);
-                        st.swipe_msg = Some(idx);
-                        return false;
-                    }
-                    let start_x = st.swipe_start_x.unwrap();
-                    let dx = (x - start_x).min(0.0).max(-70.0); // left only
-                    if dx.abs() > 5.0 {
-                        st.swipe_msg = Some(idx);
-                        st.swipe_offset = dx;
-                        return true;
-                    }
-                    false
-                });
-                if changed {
-                    cx.notify();
-                }
-            }),
+        .child(
+            canvas(
+                move |_bounds, _window, _cx| (),
+                move |bounds, (), window, _cx| {
+                    handle_touch_drag(window, bounds, move |event, _window, cx| {
+                        view.update(cx, |_this, cx| {
+                            let changed = CHAT_STATE.with(|s| {
+                                let mut st = s.borrow_mut();
+                                if matches!(event.phase, gpui::TouchPhase::Ended | gpui::TouchPhase::Cancelled) {
+                                    st.swipe_start_x = None;
+                                    st.swipe_offset = 0.0;
+                                    st.swipe_msg = None;
+                                    return st.swipe_offset.abs() > 0.1;
+                                }
+                                let x = event.position.x.as_f32();
+                                if st.swipe_msg.is_some() && st.swipe_msg != Some(idx) {
+                                    return false;
+                                }
+                                if st.swipe_start_x.is_none() {
+                                    st.swipe_start_x = Some(x);
+                                    st.swipe_msg = Some(idx);
+                                    return false;
+                                }
+                                let start_x = st.swipe_start_x.unwrap();
+                                let dx = (x - start_x).min(0.0).max(-70.0); // left only
+                                if dx.abs() > 5.0 {
+                                    st.swipe_msg = Some(idx);
+                                    st.swipe_offset = dx;
+                                    return true;
+                                }
+                                false
+                            });
+                            if changed {
+                                cx.notify();
+                            }
+                        });
+                    });
+                },
+            )
+            .absolute()
+            .size_full(),
         );
 
     if show_picker {

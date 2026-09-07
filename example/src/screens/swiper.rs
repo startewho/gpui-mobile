@@ -8,8 +8,9 @@
 use std::cell::RefCell;
 use std::time::Duration;
 
-use gpui::{div, img, prelude::*, px, rgb, Animation, AnimationExt};
+use gpui::{canvas, div, img, prelude::*, px, rgb, Animation, AnimationExt, TouchPhase};
 
+use crate::gesture::handle_touch_drag;
 use super::{Router, BLUE, GREEN, LIGHT_CARD_BG, LIGHT_TEXT, RED, SURFACE0, TEXT, YELLOW};
 
 /// Swipe distance threshold (in px) to trigger card dismissal.
@@ -265,73 +266,93 @@ pub fn render(router: &Router, cx: &mut gpui::Context<Router>) -> impl IntoEleme
     let drag_area = div()
         .w(px(320.0))
         .h(px(420.0))
+        .relative()
         .child(stack)
         .when(!is_flying, |el| {
-            el.on_mouse_down(
-                gpui::MouseButton::Left,
-                cx.listener(|_this, event: &gpui::MouseDownEvent, _window, cx| {
-                    SWIPER_STATE.with(|s| {
-                        let mut s = s.borrow_mut();
-                        s.dragging = true;
-                        s.drag_start_x = Some(event.position.x.as_f32());
-                        s.drag_x = 0.0;
-                    });
-                    cx.notify();
-                }),
-            )
-            .on_mouse_move(cx.listener(|_this, event: &gpui::MouseMoveEvent, _window, cx| {
-                SWIPER_STATE.with(|s| {
-                    let mut s = s.borrow_mut();
-                    if let Some(start_x) = s.drag_start_x {
-                        s.drag_x = event.position.x.as_f32() - start_x;
-                    }
-                });
-                cx.notify();
-            }))
-            .on_mouse_up(
-                gpui::MouseButton::Left,
-                cx.listener(|_this, _event: &gpui::MouseUpEvent, _window, cx| {
-                    let should_fly = SWIPER_STATE.with(|s| {
-                        let mut s = s.borrow_mut();
-                        if s.dragging {
-                            s.dragging = false;
-                            s.drag_start_x = None;
-                            if s.drag_x.abs() > SWIPE_THRESHOLD {
-                                // Trigger fly-off animation
-                                s.fly_direction = if s.drag_x > 0.0 { 1.0 } else { -1.0 };
-                                s.anim_id += 1;
-                                let direction = if s.fly_direction > 0.0 { "LIKED" } else { "NOPED" };
-                                if s.index < PROFILES.len() {
-                                    log::info!("Swiper: {} {}", direction, PROFILES[s.index].name);
-                                }
-                                s.drag_x = 0.0;
-                                return true;
-                            } else {
-                                // Snap back
-                                s.drag_x = 0.0;
-                            }
-                        }
-                        false
-                    });
-                    if should_fly {
-                        // Schedule advance after animation
-                        cx.spawn(async |this, cx| {
-                            cx.background_executor()
-                                .timer(Duration::from_millis(320))
-                                .await;
-                            let _ = this.update(cx, |_this, cx| {
-                                SWIPER_STATE.with(|s| {
+            let view = cx.entity();
+            el.child(
+                canvas(
+                    move |_bounds, _window, _cx| (),
+                    move |bounds, (), window, _cx| {
+                        handle_touch_drag(window, bounds, move |event, _window, cx| {
+                            view.update(cx, |_this, cx| {
+                                let should_fly = SWIPER_STATE.with(|s| {
                                     let mut s = s.borrow_mut();
-                                    s.index += 1;
-                                    s.fly_direction = 0.0;
-                                    s.drag_x = 0.0;
+                                    match event.phase {
+                                        TouchPhase::Started => {
+                                            s.dragging = true;
+                                            s.drag_start_x = Some(event.position.x.as_f32());
+                                            s.drag_x = 0.0;
+                                            false
+                                        }
+                                        TouchPhase::Moved => {
+                                            if let Some(start_x) = s.drag_start_x {
+                                                s.drag_x = event.position.x.as_f32() - start_x;
+                                            }
+                                            false
+                                        }
+                                        TouchPhase::Ended | TouchPhase::Cancelled => {
+                                            if s.dragging {
+                                                s.dragging = false;
+                                                s.drag_start_x = None;
+                                                if s.drag_x.abs() > SWIPE_THRESHOLD {
+                                                    // Trigger fly-off animation
+                                                    s.fly_direction = if s.drag_x > 0.0 {
+                                                        1.0
+                                                    } else {
+                                                        -1.0
+                                                    };
+                                                    s.anim_id += 1;
+                                                    let direction = if s.fly_direction > 0.0 {
+                                                        "LIKED"
+                                                    } else {
+                                                        "NOPED"
+                                                    };
+                                                    if s.index < PROFILES.len() {
+                                                        log::info!(
+                                                            "Swiper: {} {}",
+                                                            direction,
+                                                            PROFILES[s.index].name
+                                                        );
+                                                    }
+                                                    s.drag_x = 0.0;
+                                                    true
+                                                } else {
+                                                    // Snap back
+                                                    s.drag_x = 0.0;
+                                                    false
+                                                }
+                                            } else {
+                                                false
+                                            }
+                                        }
+                                    }
                                 });
+                                if should_fly {
+                                    // Schedule advance after animation
+                                    cx.spawn(async |this, cx| {
+                                        cx.background_executor()
+                                            .timer(Duration::from_millis(320))
+                                            .await;
+                                        let _ = this.update(cx, |_this, cx| {
+                                            SWIPER_STATE.with(|s| {
+                                                let mut s = s.borrow_mut();
+                                                s.index += 1;
+                                                s.fly_direction = 0.0;
+                                                s.drag_x = 0.0;
+                                            });
+                                            cx.notify();
+                                        });
+                                    })
+                                    .detach();
+                                }
                                 cx.notify();
                             });
-                        }).detach();
-                    }
-                    cx.notify();
-                }),
+                        });
+                    },
+                )
+                .absolute()
+                .size_full(),
             )
         });
 

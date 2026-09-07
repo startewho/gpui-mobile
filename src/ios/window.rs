@@ -12,7 +12,6 @@
 
 use super::events::*;
 use super::IosDisplay;
-use crate::momentum::{MomentumScroller, VelocityTracker};
 use gpui::{
     point, px, size, AnyWindowHandle, AtlasKey, AtlasTextureId, AtlasTextureKind, AtlasTile,
     Bounds, Capslock, DevicePixels, DispatchEventResult, GpuSpecs, Modifiers, Pixels,
@@ -423,24 +422,6 @@ fn handle_touches(view: *mut AnyObject, touches: *mut AnyObject, event: *mut Any
 }
 
 /// iOS Window backed by UIWindow + UIViewController.
-/// Distance (logical px) the finger must travel before a touch
-/// is promoted from a potential tap to a scroll gesture.
-const SCROLL_SLOP: f32 = 8.0;
-
-/// Tracks the current touch gesture state machine.
-///
-/// This distinguishes taps (short, stationary touches) from scroll gestures
-/// (finger drags). The same pattern is used on Android.
-#[derive(Clone, Copy, Debug)]
-enum TouchState {
-    /// No active touch.
-    Idle,
-    /// Finger is down but hasn't moved beyond the slop threshold.
-    Pending { start_x: f32, start_y: f32 },
-    /// Finger has moved beyond the threshold — we are scrolling.
-    Scrolling { prev_x: f32, prev_y: f32 },
-}
-
 #[allow(clippy::type_complexity)]
 pub(crate) struct IosWindow {
     /// The UIWindow object
@@ -482,16 +463,6 @@ pub(crate) struct IosWindow {
     mouse_position: Cell<Point<Pixels>>,
     /// Current modifiers
     modifiers: Cell<Modifiers>,
-    /// Track if a touch is currently pressed
-    touch_pressed: Cell<bool>,
-    /// Touch gesture state machine — distinguishes taps from scroll drags.
-    touch_state: Cell<TouchState>,
-    /// Velocity tracker — records recent touch samples during drag gestures
-    /// so we can compute the release velocity when the finger lifts.
-    velocity_tracker: RefCell<VelocityTracker>,
-    /// Momentum scroller — produces decelerating scroll deltas after a fling
-    /// gesture, driven by the CADisplayLink frame callback.
-    momentum_scroller: RefCell<MomentumScroller>,
     /// The wgpu renderer (Metal backend on iOS).
     /// Wrapped in a `Mutex<Option<…>>` so that `draw()` (called from the
     /// `request_frame` callback) can acquire a mutable reference without
@@ -588,10 +559,6 @@ impl IosWindow {
                 appearance_changed_callback: RefCell::new(None),
                 mouse_position: Cell::new(Point::default()),
                 modifiers: Cell::new(Modifiers::default()),
-                touch_pressed: Cell::new(false),
-                touch_state: Cell::new(TouchState::Idle),
-                velocity_tracker: RefCell::new(VelocityTracker::new()),
-                momentum_scroller: RefCell::new(MomentumScroller::new()),
                 renderer: Mutex::new(None),
             };
 
@@ -763,200 +730,38 @@ impl IosWindow {
 
     /// Handle a touch event from UIKit.
     ///
-    /// Uses a state machine to distinguish **taps** from **drag gestures**:
+    /// GPUI core recognizes gestures from raw [`TouchEvent`]s through its
+    /// portable `TouchGestureRecognizer`: taps become synthesized mouse
+    /// presses, pans become `ScrollWheel` events (with fling momentum),
+    /// long presses become `LongPressEvent`s, and elements may claim a
+    /// direct drag via `TouchDragEvent`.  The platform therefore only
+    /// forwards the raw touch stream and lets GPUI do the recognition.
     ///
-    ///   DOWN  → record start position, enter "pending" (NO MouseDown yet)
-    ///   MOVE  → if finger moved > threshold → switch to "scrolling",
-    ///           emit `ScrollWheel` deltas (for scrollable containers) AND
-    ///           `MouseMove` (for interactive canvas screens like Animations)
-    ///   UP    → if still "pending" → emit `MouseDown` + `MouseUp` (tap)
-    ///           if "scrolling"   → emit final `ScrollWheel` (Ended) +
-    ///           `MouseUp` (so drag-to-throw works)
-    ///
-    /// MouseDown is **deferred** until finger-up so that starting a scroll
-    /// near a button or tab doesn't accidentally trigger navigation.
-    /// Interactive screens use `MouseMove` to track the finger during drags
-    /// and `MouseUp` to detect the end of a throw/drag gesture.
+    /// The position is reported in the window's logical points (GPUI's
+    /// coordinate space); the touch pointer's address is used as the opaque
+    /// `TouchId`, which is stable for the touch's lifetime.
     pub fn handle_touch(&self, touch: *mut AnyObject, _event: *mut AnyObject) {
         let position = touch_location_in_view(touch, self.view);
         let phase = touch_phase(touch);
-        let tap_count = touch_tap_count(touch);
-        let modifiers = self.modifiers.get();
-
-        let logical_x: f32 = position.x.into();
-        let logical_y: f32 = position.y.into();
 
         self.mouse_position.set(position);
 
-        let mut ts = self.touch_state.get();
-
-        let emit = |input: PlatformInput| {
-            if let Some(callback) = self.input_callback.borrow_mut().as_mut() {
-                callback(input);
-            }
-        };
-
-        match phase {
-            UITouchPhase::Began => {
-                self.touch_pressed.set(true);
-                // Cancel any active momentum fling — the user touched the
-                // screen again, so inertia scrolling must stop immediately.
-                self.momentum_scroller.borrow_mut().cancel();
-                self.velocity_tracker.borrow_mut().reset();
-
-                ts = TouchState::Pending {
-                    start_x: logical_x,
-                    start_y: logical_y,
-                };
-                // Do NOT emit MouseDown here — wait until we know whether
-                // this is a tap or a scroll.  Emitting MouseDown immediately
-                // causes accidental navigation when the user starts scrolling
-                // near a button/tab.
-                //
-                // - Tap (finger lifts within slop) → emit MouseDown + MouseUp
-                //   together in Ended phase.
-                // - Scroll (finger exceeds slop) → emit only MouseMove +
-                //   ScrollWheel, no MouseDown.
-            }
-
-            UITouchPhase::Moved => {
-                // Record every move for velocity estimation.
-                self.velocity_tracker
-                    .borrow_mut()
-                    .record(logical_x, logical_y);
-
-                match ts {
-                    TouchState::Pending { start_x, start_y } => {
-                        let dx = logical_x - start_x;
-                        let dy = logical_y - start_y;
-                        let distance = (dx * dx + dy * dy).sqrt();
-
-                        if distance > SCROLL_SLOP {
-                            // Promote to scrolling — emit the first scroll
-                            // delta from the start position.
-                            ts = TouchState::Scrolling {
-                                prev_x: logical_x,
-                                prev_y: logical_y,
-                            };
-                            emit(PlatformInput::ScrollWheel(gpui::ScrollWheelEvent {
-                                position,
-                                delta: gpui::ScrollDelta::Pixels(gpui::point(
-                                    gpui::px(dx),
-                                    gpui::px(dy),
-                                )),
-                                modifiers,
-                                touch_phase: gpui::TouchPhase::Started,
-                            }));
-                        }
-                        // Always emit MouseMove so interactive screens can
-                        // track finger position (e.g. drag line in Animations,
-                        // gradient control in Shaders).
-                        emit(PlatformInput::MouseMove(gpui::MouseMoveEvent {
-                            position,
-                            modifiers,
-                            pressed_button: Some(gpui::MouseButton::Left),
-                        }));
-                    }
-                    TouchState::Scrolling { prev_x, prev_y } => {
-                        let dx = logical_x - prev_x;
-                        let dy = logical_y - prev_y;
-                        ts = TouchState::Scrolling {
-                            prev_x: logical_x,
-                            prev_y: logical_y,
-                        };
-                        // Scroll event for scrollable containers.
-                        emit(PlatformInput::ScrollWheel(gpui::ScrollWheelEvent {
-                            position,
-                            delta: gpui::ScrollDelta::Pixels(gpui::point(
-                                gpui::px(dx),
-                                gpui::px(dy),
-                            )),
-                            modifiers,
-                            touch_phase: gpui::TouchPhase::Moved,
-                        }));
-                        // MouseMove for interactive screens.
-                        emit(PlatformInput::MouseMove(gpui::MouseMoveEvent {
-                            position,
-                            modifiers,
-                            pressed_button: Some(gpui::MouseButton::Left),
-                        }));
-                    }
-                    TouchState::Idle => {
-                        // Spurious move without a preceding down — ignore.
-                    }
-                }
-            }
-
-            UITouchPhase::Ended | UITouchPhase::Cancelled => {
-                self.touch_pressed.set(false);
-                match ts {
-                    TouchState::Pending { start_x, start_y } => {
-                        // Finger lifted without exceeding slop → tap.
-                        // Emit MouseDown + MouseUp together at the original
-                        // down position so hit-testing matches the initial
-                        // touch point.
-                        self.velocity_tracker.borrow_mut().reset();
-                        let tap_pos = gpui::point(gpui::px(start_x), gpui::px(start_y));
-                        emit(PlatformInput::MouseDown(gpui::MouseDownEvent {
-                            button: gpui::MouseButton::Left,
-                            position: tap_pos,
-                            modifiers,
-                            click_count: tap_count as usize,
-                            first_mouse: false,
-                        }));
-                        emit(PlatformInput::MouseUp(gpui::MouseUpEvent {
-                            button: gpui::MouseButton::Left,
-                            position: tap_pos,
-                            modifiers,
-                            click_count: tap_count as usize,
-                        }));
-                    }
-                    TouchState::Scrolling { prev_x, prev_y } => {
-                        // End the active touch-scroll gesture.
-                        let dx = logical_x - prev_x;
-                        let dy = logical_y - prev_y;
-                        emit(PlatformInput::ScrollWheel(gpui::ScrollWheelEvent {
-                            position,
-                            delta: gpui::ScrollDelta::Pixels(gpui::point(
-                                gpui::px(dx),
-                                gpui::px(dy),
-                            )),
-                            modifiers,
-                            touch_phase: gpui::TouchPhase::Ended,
-                        }));
-                        // Also emit MouseUp so interactive screens can
-                        // detect the end of a drag (e.g. fling a ball).
-                        emit(PlatformInput::MouseUp(gpui::MouseUpEvent {
-                            button: gpui::MouseButton::Left,
-                            position,
-                            modifiers,
-                            click_count: 1,
-                        }));
-
-                        // ── Start momentum / inertia scrolling ───────────
-                        // Compute release velocity from recent touch samples
-                        // and kick off the momentum scroller.  Subsequent
-                        // frames will pump synthetic ScrollWheel events via
-                        // `pump_momentum()` until velocity decays below the
-                        // threshold.
-                        let (vx, vy) = self.velocity_tracker.borrow().velocity();
-                        self.velocity_tracker.borrow_mut().reset();
-                        self.momentum_scroller
-                            .borrow_mut()
-                            .fling(vx, vy, logical_x, logical_y);
-                    }
-                    TouchState::Idle => {}
-                }
-                ts = TouchState::Idle;
-            }
-
-            UITouchPhase::Stationary => {
-                // No change — ignore.
-                return;
-            }
+        // The stationary phase carries no motion — ignore it.
+        if phase == UITouchPhase::Stationary {
+            return;
         }
 
-        self.touch_state.set(ts);
+        let event = gpui::TouchEvent {
+            id: gpui::TouchId(touch as usize as u64),
+            phase: phase.into(),
+            position,
+            predicted_position: None,
+            force: None,
+        };
+
+        if let Some(callback) = self.input_callback.borrow_mut().as_mut() {
+            callback(PlatformInput::Touch(event));
+        }
     }
 
     /// Query the safe area insets from the UIView.
@@ -1002,63 +807,6 @@ impl IosWindow {
                 insets.left as f32,
                 insets.right as f32,
             )
-        }
-    }
-
-    /// Advance the momentum scroller by one frame and emit a synthetic
-    /// `ScrollWheel` event if the fling is still active.
-    ///
-    /// Called from `gpui_ios_request_frame` on every CADisplayLink tick,
-    /// **before** the GPUI render callback runs, so that the scroll delta
-    /// is picked up during the current frame's layout/paint cycle.
-    pub(crate) fn pump_momentum(&self) {
-        let mut scroller = self.momentum_scroller.borrow_mut();
-        if !scroller.is_active() {
-            return;
-        }
-
-        if let Some(delta) = scroller.step() {
-            let modifiers = self.modifiers.get();
-            let position = gpui::point(gpui::px(delta.position_x), gpui::px(delta.position_y));
-            let fling_ended = !scroller.is_active();
-
-            if let Some(callback) = self.input_callback.borrow_mut().as_mut() {
-                callback(PlatformInput::ScrollWheel(gpui::ScrollWheelEvent {
-                    position,
-                    delta: gpui::ScrollDelta::Pixels(gpui::point(
-                        gpui::px(delta.dx),
-                        gpui::px(delta.dy),
-                    )),
-                    modifiers,
-                    touch_phase: gpui::TouchPhase::Moved,
-                }));
-
-                // If this was the last momentum frame, send Ended now.
-                if fling_ended {
-                    callback(PlatformInput::ScrollWheel(gpui::ScrollWheelEvent {
-                        position,
-                        delta: gpui::ScrollDelta::Pixels(gpui::point(gpui::px(0.0), gpui::px(0.0))),
-                        modifiers,
-                        touch_phase: gpui::TouchPhase::Ended,
-                    }));
-                }
-            }
-        } else {
-            // Fling finished — emit one final Ended event so GPUI knows
-            // the scroll gesture is truly complete.
-            let position = gpui::point(
-                gpui::px(scroller.position_x()),
-                gpui::px(scroller.position_y()),
-            );
-            let modifiers = self.modifiers.get();
-            if let Some(callback) = self.input_callback.borrow_mut().as_mut() {
-                callback(PlatformInput::ScrollWheel(gpui::ScrollWheelEvent {
-                    position,
-                    delta: gpui::ScrollDelta::Pixels(gpui::point(gpui::px(0.0), gpui::px(0.0))),
-                    modifiers,
-                    touch_phase: gpui::TouchPhase::Ended,
-                }));
-            }
         }
     }
 

@@ -60,6 +60,7 @@
 extern crate gpui_mobile;
 
 pub mod demos;
+pub mod gesture;
 pub mod screens;
 
 #[cfg(any(target_os = "ios", target_os = "android"))]

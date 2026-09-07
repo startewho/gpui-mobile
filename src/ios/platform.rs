@@ -13,9 +13,10 @@ use anyhow::anyhow;
 use futures::channel::oneshot;
 use gpui::{
     Action, AnyWindowHandle, BackgroundExecutor, ClipboardItem, CursorStyle, DummyKeyboardMapper,
-    ForegroundExecutor, Keymap, Menu, MenuItem, PathPromptOptions, Platform, PlatformDisplay,
-    PlatformKeyboardLayout, PlatformKeyboardMapper, PlatformTextSystem, PlatformWindow, Result,
-    Task, ThermalState, WindowAppearance, WindowParams,
+    ForegroundExecutor, GestureTuning, Keymap, Menu, MenuItem, PathPromptOptions, Platform,
+    PlatformDisplay, PlatformGestures, PlatformKeyboardLayout, PlatformKeyboardMapper,
+    PlatformTextSystem, PlatformWindow, Result, ScrollPhysics, Task, ThermalState,
+    WindowAppearance, WindowParams,
 };
 use objc2::runtime::AnyObject;
 use objc2::{class, msg_send};
@@ -33,9 +34,27 @@ pub(crate) struct IosPlatformState {
     foreground_executor: ForegroundExecutor,
     text_system: Arc<dyn PlatformTextSystem>,
     finish_launching: Option<Box<dyn FnOnce()>>,
-    quit_callback: Option<Box<dyn FnMut()>>,
+    quit_callback: Option<Box<dyn FnMut() -> bool>>,
     open_urls_callback: Option<Box<dyn FnMut(Vec<String>)>>,
     thermal_state_callback: Option<Box<dyn FnMut()>>,
+}
+
+/// iOS's gesture recognition services.
+///
+/// GPUI core ships a portable `TouchGestureRecognizer` that recognizes taps,
+/// pans, long presses and touch drags from raw `TouchEvent`s.  iOS feeds those
+/// raw touches to GPUI and lets the portable recognizers do the work, so this
+/// only supplies the platform's feel constants.  The scroll physics use
+/// `UIScrollView`'s normal exponential decay model (`ScrollPhysics::ios()`).
+struct IosGestures;
+
+impl PlatformGestures for IosGestures {
+    fn tuning(&self) -> GestureTuning {
+        GestureTuning {
+            scroll_physics: ScrollPhysics::ios(),
+            ..Default::default()
+        }
+    }
 }
 
 impl Default for IosPlatform {
@@ -119,7 +138,7 @@ impl Platform for IosPlatform {
         log::warn!("iOS apps cannot programmatically quit");
     }
 
-    fn restart(&self, _binary_path: Option<PathBuf>) {
+    fn restart(&self, _binary_path: Option<PathBuf>, _arguments: Vec<std::ffi::OsString>) {
         // iOS apps cannot restart themselves
         log::warn!("iOS apps cannot restart themselves");
     }
@@ -239,12 +258,20 @@ impl Platform for IosPlatform {
         // Would use UIDocumentInteractionController or UIActivityViewController
     }
 
-    fn on_quit(&self, callback: Box<dyn FnMut()>) {
+    fn on_quit(&self, callback: Box<dyn FnMut() -> bool>) {
         self.0.lock().quit_callback = Some(callback);
     }
 
     fn on_reopen(&self, _callback: Box<dyn FnMut()>) {
         // iOS handles app reopening through scene lifecycle
+    }
+
+    fn gestures(&self) -> Option<Rc<dyn PlatformGestures>> {
+        Some(Rc::new(IosGestures))
+    }
+
+    fn on_system_wake(&self, _callback: Box<dyn FnMut()>) {
+        // iOS has no "system wake" concept in the desktop sense.
     }
 
     fn set_menus(&self, _menus: Vec<Menu>, _keymap: &Keymap) {

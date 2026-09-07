@@ -6,8 +6,9 @@
 use std::cell::RefCell;
 use std::time::Duration;
 
-use gpui::{div, img, prelude::*, px, rgb};
+use gpui::{canvas, div, img, prelude::*, px, rgb};
 
+use crate::gesture::handle_touch_drag;
 use super::{Router, LIGHT_CARD_BG, LIGHT_TEXT, RED, SURFACE0, SURFACE1, TEXT, SUBTEXT, LIGHT_SUBTEXT};
 
 /// Pull distance (px) to trigger refresh.
@@ -128,73 +129,81 @@ pub fn render(router: &Router, cx: &mut gpui::Context<Router>) -> impl IntoEleme
         (s.pull_distance, s.refreshing)
     });
 
+    let view = cx.entity();
     let mut feed = div()
         .flex()
         .flex_col()
         .w_full()
+        .relative()
         // Pull-to-refresh touch handlers
-        .on_mouse_down(
-            gpui::MouseButton::Left,
-            cx.listener(|_this, event: &gpui::MouseDownEvent, _window, cx| {
-                FEED_STATE.with(|s| {
-                    let mut s = s.borrow_mut();
-                    if !s.refreshing {
-                        s.pull_start_y = Some(event.position.y.as_f32());
-                    }
-                });
-                cx.notify();
-            }),
-        )
-        .on_mouse_move(cx.listener(|_this, event: &gpui::MouseMoveEvent, _window, cx| {
-            FEED_STATE.with(|s| {
-                let mut s = s.borrow_mut();
-                if let Some(start_y) = s.pull_start_y {
-                    let delta = event.position.y.as_f32() - start_y;
-                    // Only allow downward pull (positive delta) with diminishing return
-                    s.pull_distance = if delta > 0.0 {
-                        delta * 0.5 // Rubber-band effect
-                    } else {
-                        0.0
-                    };
-                }
-            });
-            cx.notify();
-        }))
-        .on_mouse_up(
-            gpui::MouseButton::Left,
-            cx.listener(|_this, _, _, cx| {
-                let should_refresh = FEED_STATE.with(|s| {
-                    let mut s = s.borrow_mut();
-                    s.pull_start_y = None;
-                    if s.pull_distance > REFRESH_THRESHOLD {
-                        // Trigger refresh
-                        s.refreshing = true;
-                        s.pull_distance = 60.0; // Keep indicator visible
-                        true
-                    } else {
-                        s.pull_distance = 0.0;
-                        false
-                    }
-                });
-                if should_refresh {
-                    cx.spawn(async |this, cx| {
-                        cx.background_executor()
-                            .timer(Duration::from_millis(1500))
-                            .await;
-                        let _ = this.update(cx, |_this, cx| {
-                            FEED_STATE.with(|s| {
+        .child(
+            canvas(
+                move |_bounds, _window, _cx| (),
+                move |bounds, (), window, _cx| {
+                    handle_touch_drag(window, bounds, move |event, _window, cx| {
+                        view.update(cx, |_this, cx| {
+                            let should_refresh = FEED_STATE.with(|s| {
                                 let mut s = s.borrow_mut();
-                                s.refreshing = false;
-                                s.pull_distance = 0.0;
-                                // Reset likes on refresh for demo
-                                s.likes = [false; 6];
+                                match event.phase {
+                                    gpui::TouchPhase::Started => {
+                                        if !s.refreshing {
+                                            s.pull_start_y = Some(event.position.y.as_f32());
+                                        }
+                                        false
+                                    }
+                                    gpui::TouchPhase::Moved => {
+                                        if let Some(start_y) = s.pull_start_y {
+                                            let delta =
+                                                event.position.y.as_f32() - start_y;
+                                            // Only allow downward pull (positive delta) with
+                                            // diminishing return
+                                            s.pull_distance = if delta > 0.0 {
+                                                delta * 0.5 // Rubber-band effect
+                                            } else {
+                                                0.0
+                                            };
+                                        }
+                                        false
+                                    }
+                                    gpui::TouchPhase::Ended | gpui::TouchPhase::Cancelled => {
+                                        s.pull_start_y = None;
+                                        if s.pull_distance > REFRESH_THRESHOLD {
+                                            // Trigger refresh
+                                            s.refreshing = true;
+                                            s.pull_distance = 60.0; // Keep indicator visible
+                                            true
+                                        } else {
+                                            s.pull_distance = 0.0;
+                                            false
+                                        }
+                                    }
+                                }
                             });
+                            if should_refresh {
+                                cx.spawn(async |this, cx| {
+                                    cx.background_executor()
+                                        .timer(Duration::from_millis(1500))
+                                        .await;
+                                    let _ = this.update(cx, |_this, cx| {
+                                        FEED_STATE.with(|s| {
+                                            let mut s = s.borrow_mut();
+                                            s.refreshing = false;
+                                            s.pull_distance = 0.0;
+                                            // Reset likes on refresh for demo
+                                            s.likes = [false; 6];
+                                        });
+                                        cx.notify();
+                                    });
+                                })
+                                .detach();
+                            }
                             cx.notify();
                         });
-                    }).detach();
-                }
-                cx.notify();
-            }),
+                    });
+                },
+            )
+            .absolute()
+            .size_full(),
         );
 
     // ── Pull-to-refresh indicator ──────────────────────────────────

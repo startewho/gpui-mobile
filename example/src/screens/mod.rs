@@ -27,9 +27,10 @@ pub mod video_player;
 pub mod webview_browser;
 
 use crate::demos::{AnimationPlayground, ShaderShowcase};
+use crate::gesture::handle_touch_drag;
 use gpui::{
-    div, point, prelude::*, px, rgb, size, Bounds, Context, MouseButton, MouseDownEvent,
-    MouseMoveEvent, MouseUpEvent, SharedString, Window,
+    canvas, div, point, prelude::*, px, rgb, size, Bounds, Context, MouseButton, MouseDownEvent,
+    MouseUpEvent, SharedString, TouchPhase, Window,
 };
 use gpui_mobile::components::material::{MaterialTheme, NavigationBarBuilder, TopAppBar};
 use gpui_mobile::{set_system_chrome, StatusBarContentStyle, SystemChromeStyle};
@@ -655,26 +656,16 @@ impl Router {
             });
         }
 
+        let view = cx.entity();
         div()
             .flex_1()
+            .relative()
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, event: &MouseDownEvent, _window, cx| {
                     if let Some(playground) = &mut this.animation_playground {
                         let pos = point(event.position.x.as_f32(), event.position.y.as_f32());
                         playground.touch_start = Some((pos, std::time::Instant::now()));
-                        playground.current_touch = Some(pos);
-                        cx.notify();
-                    }
-                }),
-            )
-            .on_mouse_move(
-                cx.listener(|this, event: &MouseMoveEvent, _window, cx| {
-                    if let Some(playground) = &mut this.animation_playground {
-                        let pos = point(event.position.x.as_f32(), event.position.y.as_f32());
-                        if playground.touch_start.is_none() {
-                            playground.touch_start = Some((pos, std::time::Instant::now()));
-                        }
                         playground.current_touch = Some(pos);
                         cx.notify();
                     }
@@ -707,6 +698,78 @@ impl Router {
                     }
                 }),
             )
+            .child(
+                canvas(
+                    move |_bounds, _window, _cx| (),
+                    move |bounds, (), window, _cx| {
+                        handle_touch_drag(window, bounds, move |event, _window, cx| {
+                            view.update(cx, |this, cx| {
+                                if let Some(playground) = &mut this.animation_playground {
+                                    match event.phase {
+                                        TouchPhase::Started => {
+                                            let start_pos = point(
+                                                event.start_position.x.as_f32(),
+                                                event.start_position.y.as_f32(),
+                                            );
+                                            playground.touch_start =
+                                                Some((start_pos, std::time::Instant::now()));
+                                            playground.current_touch = Some(point(
+                                                event.position.x.as_f32(),
+                                                event.position.y.as_f32(),
+                                            ));
+                                        }
+                                        TouchPhase::Moved => {
+                                            playground.current_touch = Some(point(
+                                                event.position.x.as_f32(),
+                                                event.position.y.as_f32(),
+                                            ));
+                                        }
+                                        TouchPhase::Ended => {
+                                            let position = point(
+                                                event.position.x.as_f32(),
+                                                event.position.y.as_f32(),
+                                            );
+                                            if let Some((start_pos, start_time)) =
+                                                playground.touch_start.take()
+                                            {
+                                                let elapsed = start_time.elapsed();
+                                                let dx = position.x - start_pos.x;
+                                                let dy = position.y - start_pos.y;
+                                                let distance = (dx * dx + dy * dy).sqrt();
+
+                                                if elapsed < std::time::Duration::from_millis(200)
+                                                    && distance < 20.0
+                                                {
+                                                    let color_rgb = crate::demos::random_color(
+                                                        playground.next_ball_id,
+                                                    );
+                                                    playground.spawn_particles(
+                                                        position,
+                                                        rgb(color_rgb).into(),
+                                                    );
+                                                    playground.next_ball_id += 1;
+                                                } else {
+                                                    let dt = elapsed.as_secs_f32().max(0.01);
+                                                    let velocity =
+                                                        point(dx / dt * 0.5, dy / dt * 0.5);
+                                                    playground.spawn_ball(start_pos, velocity);
+                                                }
+                                            }
+                                            playground.current_touch = None;
+                                        }
+                                        _ => {
+                                            playground.current_touch = None;
+                                        }
+                                    }
+                                    cx.notify();
+                                }
+                            });
+                        });
+                    },
+                )
+                .absolute()
+                .size_full(),
+            )
             .child(if let Some(playground) = &mut self.animation_playground {
                 playground.render_content(window).into_any_element()
             } else {
@@ -737,8 +800,10 @@ impl Router {
             ));
         }
 
+        let view = cx.entity();
         div()
             .flex_1()
+            .relative()
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, event: &MouseDownEvent, _window, cx| {
@@ -750,13 +815,6 @@ impl Router {
                     }
                 }),
             )
-            .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _window, cx| {
-                if let Some(showcase) = &mut this.shader_showcase {
-                    let pos = point(event.position.x.as_f32(), event.position.y.as_f32());
-                    showcase.touch_position = Some(pos);
-                    cx.notify();
-                }
-            }))
             .on_mouse_up(
                 MouseButton::Left,
                 cx.listener(|this, _event: &MouseUpEvent, _window, cx| {
@@ -765,6 +823,41 @@ impl Router {
                         cx.notify();
                     }
                 }),
+            )
+            .child(
+                canvas(
+                    move |_bounds, _window, _cx| (),
+                    move |bounds, (), window, _cx| {
+                        handle_touch_drag(window, bounds, move |event, _window, cx| {
+                            view.update(cx, |this, cx| {
+                                if let Some(showcase) = &mut this.shader_showcase {
+                                    match event.phase {
+                                        TouchPhase::Started => {
+                                            let pos = point(
+                                                event.start_position.x.as_f32(),
+                                                event.start_position.y.as_f32(),
+                                            );
+                                            showcase.touch_position = Some(pos);
+                                            showcase.spawn_ripple(pos);
+                                        }
+                                        TouchPhase::Moved => {
+                                            showcase.touch_position = Some(point(
+                                                event.position.x.as_f32(),
+                                                event.position.y.as_f32(),
+                                            ));
+                                        }
+                                        TouchPhase::Ended | TouchPhase::Cancelled => {
+                                            showcase.touch_position = None;
+                                        }
+                                    }
+                                    cx.notify();
+                                }
+                            });
+                        });
+                    },
+                )
+                .absolute()
+                .size_full(),
             )
             .child(if let Some(showcase) = &mut self.shader_showcase {
                 showcase.render_content(window).into_any_element()
