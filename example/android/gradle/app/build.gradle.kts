@@ -43,6 +43,7 @@ android {
         // This must match the cdylib / example output name.
         ndk {
             abiFilters += listOf("arm64-v8a")
+            abiFilters += listOf("x86_64")
         }
 
         // Forward the library name to the manifest via a placeholder.

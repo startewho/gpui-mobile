@@ -117,7 +117,7 @@ echo [STEP] Building Rust shared library for %NDK_ABI% (%PROFILE%)
 set "JNI_LIBS_DIR=%ANDROID_GRADLE_DIR%\app\src\main\jniLibs"
 
 pushd "%EXAMPLES_DIR%"
-cargo ndk -t %NDK_ABI% -o "%JNI_LIBS_DIR%" --platform 31 build %CARGO_PROFILE_FLAG%
+cargo ndk -t %NDK_ABI% -o "%JNI_LIBS_DIR%" --platform 35 build %CARGO_PROFILE_FLAG%
 set "RUST_RES=%ERRORLEVEL%"
 popd
 
@@ -181,7 +181,7 @@ if %ERRORLEVEL% NEQ 0 (
 
 echo [INFO] Launching app...
 :: Use direct command, no complex line continuation
-adb shell am start -n "dev.gpui.mobile.example/android.app.NativeActivity" -a android.intent.action.MAIN -c android.intent.category.LAUNCHER
+adb shell am start -n "dev.gpui.mobile.example/dev.gpui.mobile.GpuiActivity" -a android.intent.action.MAIN -c android.intent.category.LAUNCHER
 
 echo [INFO] App launched on Android!
 echo [INFO] View logs with: adb logcat -s gpui-mobile-example:D
