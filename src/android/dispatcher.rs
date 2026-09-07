@@ -34,7 +34,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use gpui::{PlatformDispatcher, Priority, RunnableVariant, ThreadTaskTimings};
+use gpui::{PlatformDispatcher, Priority, RunnableVariant};
 use parking_lot::Mutex;
 
 // ── NDK / libc symbols we need ────────────────────────────────────────────────
@@ -495,8 +495,6 @@ unsafe fn libc_fcntl(fd: i32, cmd: i32, arg: i32) -> i32 {
 // ── impl PlatformDispatcher ───────────────────────────────────────────────────
 
 impl PlatformDispatcher for AndroidDispatcher {
-  
-
     fn is_main_thread(&self) -> bool {
         // Delegate to the existing `is_main_thread` method.
         AndroidDispatcher::is_main_thread(self)

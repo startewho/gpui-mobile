@@ -36,9 +36,10 @@ use anyhow::Result;
 use futures::channel::oneshot;
 use gpui::{
     Action, AnyWindowHandle, BackgroundExecutor, ClipboardItem, CursorStyle, ForegroundExecutor,
-    KeybindingKeystroke, Keymap, Keystroke, Menu, MenuItem, PathPromptOptions, Platform,
-    PlatformDisplay, PlatformKeyboardLayout, PlatformKeyboardMapper, PlatformTextSystem,
-    PlatformWindow, Task, ThermalState, WindowAppearance, WindowParams,
+    GestureTuning, KeybindingKeystroke, Keymap, Keystroke, Menu, MenuItem, PathPromptOptions,
+    Platform, PlatformDisplay, PlatformGestures, PlatformKeyboardLayout, PlatformKeyboardMapper,
+    PlatformTextSystem, PlatformWindow, ScrollPhysics, Task, ThermalState, WindowAppearance,
+    WindowParams,
 };
 use gpui_wgpu::CosmicTextSystem;
 use parking_lot::Mutex;
@@ -145,8 +146,10 @@ struct AndroidPlatformState {
     /// The `on_finish_launching` closure passed to `run()`.
     finish_launching: Option<Box<dyn FnOnce() + Send>>,
 
-    /// Called when the app is about to quit.
-    quit_callback: Option<Box<dyn FnMut() + Send>>,
+    /// Called when the app is about to quit.  Returns `true` if the app should
+    /// actually shut down (the callback may veto a synchronous quit while the
+    /// `AppCell` is borrowed).
+    quit_callback: Option<Box<dyn FnMut() -> bool + Send>>,
 
     /// Called when the app is re-opened (e.g. tapped in the recents screen
     /// while already running).
@@ -197,6 +200,25 @@ pub struct AndroidPlatform {
     state: Mutex<AndroidPlatformState>,
     /// Set to `true` when `quit()` is called; the main loop checks this.
     should_quit: AtomicBool,
+}
+
+/// Android's gesture recognition services.
+///
+/// GPUI core ships a portable [`TouchGestureRecognizer`](gpui::TouchGestureRecognizer)
+/// that recognizes taps, pans, long presses and touch drags from raw
+/// [`TouchEvent`](gpui::TouchEvent)s.  Android feeds those raw touches to GPUI
+/// and lets the portable recognizers do the work, so this only supplies the
+/// platform's feel constants.  The scroll physics use Android's `OverScroller`
+/// friction spline so flings decelerate the way Android users expect.
+struct AndroidGestures;
+
+impl PlatformGestures for AndroidGestures {
+    fn tuning(&self) -> GestureTuning {
+        GestureTuning {
+            scroll_physics: ScrollPhysics::android(),
+            ..Default::default()
+        }
+    }
 }
 
 /// Check whether a TrueType/OpenType font file contains CBDT (Color Bitmap
@@ -511,21 +533,27 @@ impl AndroidPlatform {
 
     /// Request a graceful quit.
     ///
-    /// Sets the `should_quit` flag; the main loop will exit on the next tick.
-    /// Invokes the registered quit callback before returning.
+    /// Invokes the registered quit callback (which returns `true` when the app
+    /// may shut down synchronously).  Only sets the `should_quit` flag when the
+    /// callback reports success; the main loop exits on the next tick.
     pub fn quit(&self) {
         log::info!("AndroidPlatform::quit");
-        self.should_quit.store(true, Ordering::SeqCst);
 
         let cb = self.state.lock().quit_callback.as_mut().map(|cb| {
             // We cannot move out of an `&mut FnMut`, so we call it in place.
-            cb as *mut Box<dyn FnMut() + Send>
+            cb as *mut Box<dyn FnMut() -> bool + Send>
         });
 
-        if let Some(cb_ptr) = cb {
+        let should_quit = if let Some(cb_ptr) = cb {
             // SAFETY: The pointer is valid for the duration of this call
             // because we hold the lock-guard's lifetime indirectly.
-            unsafe { (*cb_ptr)() };
+            unsafe { (*cb_ptr)() }
+        } else {
+            true
+        };
+
+        if should_quit {
+            self.should_quit.store(true, Ordering::SeqCst);
         }
     }
 
@@ -893,9 +921,11 @@ impl AndroidPlatform {
     // ── callback registration ─────────────────────────────────────────────────
 
     /// Register a callback invoked when the app is about to quit.
+    ///
+    /// The callback returns `true` if the app should shut down.
     pub fn on_quit<F>(&self, cb: F)
     where
-        F: FnMut() + Send + 'static,
+        F: FnMut() -> bool + Send + 'static,
     {
         self.state.lock().quit_callback = Some(Box::new(cb));
     }
@@ -976,23 +1006,28 @@ impl Platform for AndroidPlatform {
 
     fn quit(&self) {
         log::info!("AndroidPlatform::quit");
-        self.should_quit.store(true, Ordering::SeqCst);
 
         let cb = self
             .state
             .lock()
             .quit_callback
             .as_mut()
-            .map(|cb| cb as *mut Box<dyn FnMut() + Send>);
+            .map(|cb| cb as *mut Box<dyn FnMut() -> bool + Send>);
 
-        if let Some(cb_ptr) = cb {
+        let should_quit = if let Some(cb_ptr) = cb {
             // SAFETY: pointer is valid for the duration of this call because
             // we hold the lock-guard's lifetime indirectly.
-            unsafe { (*cb_ptr)() };
+            unsafe { (*cb_ptr)() }
+        } else {
+            true
+        };
+
+        if should_quit {
+            self.should_quit.store(true, Ordering::SeqCst);
         }
     }
 
-    fn restart(&self, _binary_path: Option<PathBuf>) {
+    fn restart(&self, _binary_path: Option<PathBuf>, _arguments: Vec<std::ffi::OsString>) {
         log::warn!("AndroidPlatform::restart — not supported on Android");
     }
 
@@ -1122,9 +1157,11 @@ impl Platform for AndroidPlatform {
         log::info!("AndroidPlatform::open_with_system — Intent launch not yet implemented");
     }
 
-    fn on_quit(&self, callback: Box<dyn FnMut()>) {
+    fn on_quit(&self, callback: Box<dyn FnMut() -> bool>) {
         self.state.lock().quit_callback = Some(unsafe {
-            std::mem::transmute::<Box<dyn FnMut()>, Box<dyn FnMut() + Send>>(callback)
+            std::mem::transmute::<Box<dyn FnMut() -> bool>, Box<dyn FnMut() -> bool + Send>>(
+                callback,
+            )
         });
     }
 
@@ -1132,6 +1169,10 @@ impl Platform for AndroidPlatform {
         self.state.lock().reopen_callback = Some(unsafe {
             std::mem::transmute::<Box<dyn FnMut()>, Box<dyn FnMut() + Send>>(callback)
         });
+    }
+
+    fn gestures(&self) -> Option<Rc<dyn PlatformGestures>> {
+        Some(Rc::new(AndroidGestures))
     }
 
     fn set_menus(&self, _menus: Vec<Menu>, _keymap: &Keymap) {
@@ -1239,17 +1280,13 @@ impl Platform for AndroidPlatform {
             std::mem::transmute::<Box<dyn FnMut()>, Box<dyn FnMut() + Send>>(callback)
         });
     }
-    
-    fn on_system_wake(&self, callback: Box<dyn FnMut()>) {
-        
-    }
-    
-    fn hide_cursor_until_mouse_moves(&self) {
-        
-    }
-    
+
+    fn on_system_wake(&self, _callback: Box<dyn FnMut()>) {}
+
+    fn hide_cursor_until_mouse_moves(&self) {}
+
     fn is_cursor_visible(&self) -> bool {
-       true
+        true
     }
 }
 
@@ -1319,8 +1356,8 @@ impl Platform for SharedPlatform {
     fn quit(&self) {
         <AndroidPlatform as Platform>::quit(&self.0)
     }
-    fn restart(&self, binary_path: Option<PathBuf>) {
-        <AndroidPlatform as Platform>::restart(&self.0, binary_path)
+    fn restart(&self, binary_path: Option<PathBuf>, arguments: Vec<std::ffi::OsString>) {
+        <AndroidPlatform as Platform>::restart(&self.0, binary_path, arguments)
     }
     fn activate(&self, ignoring_other_apps: bool) {
         <AndroidPlatform as Platform>::activate(&self.0, ignoring_other_apps)
@@ -1384,11 +1421,14 @@ impl Platform for SharedPlatform {
     fn open_with_system(&self, path: &Path) {
         <AndroidPlatform as Platform>::open_with_system(&self.0, path)
     }
-    fn on_quit(&self, callback: Box<dyn FnMut()>) {
+    fn on_quit(&self, callback: Box<dyn FnMut() -> bool>) {
         <AndroidPlatform as Platform>::on_quit(&self.0, callback)
     }
     fn on_reopen(&self, callback: Box<dyn FnMut()>) {
         <AndroidPlatform as Platform>::on_reopen(&self.0, callback)
+    }
+    fn gestures(&self) -> Option<Rc<dyn PlatformGestures>> {
+        <AndroidPlatform as Platform>::gestures(&self.0)
     }
     fn set_menus(&self, menus: Vec<Menu>, keymap: &Keymap) {
         <AndroidPlatform as Platform>::set_menus(&self.0, menus, keymap)
@@ -1447,15 +1487,15 @@ impl Platform for SharedPlatform {
     fn on_keyboard_layout_change(&self, callback: Box<dyn FnMut()>) {
         <AndroidPlatform as Platform>::on_keyboard_layout_change(&self.0, callback)
     }
-    
+
     fn on_system_wake(&self, callback: Box<dyn FnMut()>) {
-       <AndroidPlatform as Platform>::on_system_wake(&self.0, callback)
+        <AndroidPlatform as Platform>::on_system_wake(&self.0, callback)
     }
-    
+
     fn hide_cursor_until_mouse_moves(&self) {
         <AndroidPlatform as Platform>::hide_cursor_until_mouse_moves(&self.0)
     }
-    
+
     fn is_cursor_visible(&self) -> bool {
         <AndroidPlatform as Platform>::is_cursor_visible(&self.0)
     }

@@ -16,9 +16,9 @@ path = "src/main.rs"
 
 [dependencies]
 gpui-mobile = { path = ".." }
-gpui = { git = "https://github.com/zed-industries/zed", rev = "f96212f2c50f54d93712fa130d6226b1ce7d76b5", package = "gpui", default-features = false }
-reqwest_client = { git = "https://github.com/zed-industries/zed", rev = "f96212f2c50f54d93712fa130d6226b1ce7d76b5", package = "reqwest_client" }
-reqwest = { git = "https://github.com/zed-industries/reqwest.git", rev = "c15662463bda39148ba154100dd44d3fba5873a4", package = "zed-reqwest", default-features = false, features = ["rustls-tls"] }
+gpui = { git = "https://github.com/zed-industries/zed", rev = "1870e269ad88802147f2baec3086abb67d17260a", package = "gpui", default-features = false }
+reqwest_client = { git = "https://github.com/zed-industries/zed", rev = "1870e269ad88802147f2baec3086abb67d17260a", package = "reqwest_client" }
+reqwest = { git = "https://github.com/zed-industries/reqwest.git", rev = "33bc764aa15ff7b200bf7c93bd96e24878d53e14", package = "zed-reqwest", default-features = false, features = ["rustls-tls"] }
 log = "0.4"
 
 [target.'cfg(target_os = "ios")'.dependencies]
